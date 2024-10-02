@@ -34,8 +34,8 @@ def main():
 
     if dados_temp:
         # Definir caminhos de salvamento
-        caminho_csv = r'Z:\T.I\.DAVID\Python\return_itens_by_sale.csv'
-        caminho_excel = r'Z:\T.I\.DAVID\Python\return_itens_by_sale.xlsx'
+        caminho_csv = r''
+        caminho_excel = r''
 
         # Verificar se o diretório existe, se não, criá-lo
         os.makedirs(os.path.dirname(caminho_csv), exist_ok=True)
