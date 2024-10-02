@@ -40,8 +40,8 @@ def get_user_inputs():
     pdf_file_name = simpledialog.askstring("Input", "Digite o nome do arquivo PDF (sem extensão):")
     target_date = simpledialog.askstring("Input", "Digite a data específica (formato DD/MM/YYYY):")
     
-    pdf_folder_path = r'Z:\T.I\DAVID\Python\arquivos pdf'
-    excel_file_path = r'Z:\T.I\DAVID\Python\output.xlsx'
+    pdf_folder_path = r''
+    excel_file_path = r''
     pdf_file_path = os.path.join(pdf_folder_path, f'{pdf_file_name}.pdf')
     
     extract_and_write_lines_with_date_from_pdf(pdf_file_path, target_date, excel_file_path)
