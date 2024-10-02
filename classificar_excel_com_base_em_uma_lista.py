@@ -4,7 +4,7 @@ from tkinter import filedialog
 from tkinter import messagebox
 
 # Caminho para a pasta contendo o arquivo de dicionário
-caminho_dicionario = r"Y:\Informações Caixas\Medicina e Odontologia\REPOSITORIO\LISTA\dicionario.txt"
+caminho_dicionario = r""
 
 # Função para carregar frases de um arquivo .txt
 def carregar_frases(caminho_arquivo_txt):
