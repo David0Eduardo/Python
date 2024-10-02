@@ -8,8 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # Definições dos caminhos dos dicionários diretamente no código
-CAMINHO_DICIONARIO_CREDIT = r'Y:\Informações Caixas\Medicina e Odontologia\REPOSITORIO\DICIONARIOS\credit'
-CAMINHO_DICIONARIO_DEBIT = r'Y:\Informações Caixas\Medicina e Odontologia\REPOSITORIO\DICIONARIOS\debit'
+CAMINHO_DICIONARIO_CREDIT = r''
+CAMINHO_DICIONARIO_DEBIT = r''
 
 # Inicializa os dicionários de frases
 frases_por_dicionario_credit = {}
