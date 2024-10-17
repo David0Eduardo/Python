@@ -1,0 +1,162 @@
+from flask import Flask, jsonify, request
+import pyodbc
+import jwt
+import os
+import pandas as pd
+from dotenv import load_dotenv
+
+app = Flask(__name__)
+
+# Configurações do banco de dados
+server = 'localhost'
+instance = 'TESTES'
+database = 'pythonofx'
+username = 'python'
+password = 'senha'
+
+load_dotenv()  # Carrega as variáveis do arquivo .env
+SECRET_KEY = os.getenv('SECRET_KEY')
+
+# Caminho da planilha
+EXCEL_FILE_PATH = 'user_api.xlsx'
+
+print(f"SECRET_KEY: {SECRET_KEY}")  # Verifique se a chave está correta
+
+# Função para conectar ao banco de dados
+def connect_to_database(server, instance, database, username, password):
+    connection_string = f'DRIVER={{SQL Server}};SERVER={server}\\{instance};DATABASE={database};UID={username};PWD={password};'
+    try:
+        conn = pyodbc.connect(connection_string)
+        print(f"Conexão estabelecida com sucesso no banco de dados '{database}' na instância '{instance}'!")
+        return conn
+    except pyodbc.Error as e:
+        print("Erro ao conectar-se ao banco de dados:", e)
+        return None
+
+# Função para gerar um token JWT
+def generate_token(user_id):
+    payload = {'user_id': user_id}
+    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+    return token
+
+# Função para verificar o token JWT
+def verify_token(request):
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.split(" ")[0] == 'Bearer':
+        token = auth_header.split(" ")[1]
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+            return payload['user_id'], None
+        except jwt.ExpiredSignatureError:
+            return None, "Token expirado"
+        except jwt.InvalidTokenError:
+            return None, "Token inválido"
+    return None, "Token ausente ou malformado"
+
+# Função para verificar o status do usuário na planilha
+def is_user_active(username):
+    try:
+        df = pd.read_excel(EXCEL_FILE_PATH)
+        print("Colunas encontradas na planilha:", df.columns)  # Exibe as colunas para verificação
+        user_status = df.loc[df['User'] == username, 'Status'].values
+        print(f"Status do usuário '{username}':", user_status)
+
+        if user_status and user_status[0].strip().upper() == 'UP':
+            return True
+        return False
+    except Exception as e:
+        print(f"Erro ao ler a planilha: {e}")
+        return False
+
+# Endpoint para gerar o token
+@app.route('/get-token', methods=['GET'])
+def get_token():
+    username = request.args.get('username')
+    password = request.args.get('password')
+
+    # Carrega os dados da planilha
+    try:
+        df = pd.read_excel(EXCEL_FILE_PATH)
+        print("Colunas encontradas na planilha:", df.columns)
+
+        # Verifica se o usuário existe na planilha e se a senha corresponde
+        user_row = df.loc[(df['User'] == username) & (df['Password'] == password)]
+        
+        if user_row.empty:
+            return jsonify({'error': 'Usuário ou senha inválidos'}), 401
+
+        # Verifica se o usuário está ativo (UP)
+        user_status = user_row['Status'].values[0].strip().upper()
+        if user_status != 'UP':
+            return jsonify({'error': 'Usuário inativo'}), 403
+
+        # Gera o token usando o ID do usuário da planilha
+        user_id = int(user_row['ID'].values[0])  # Converte para int para evitar problemas de serialização
+        token = generate_token(user_id=user_id)
+        return jsonify({'token': token}), 200
+
+    except Exception as e:
+        print(f"Erro ao processar a planilha: {e}")
+        return jsonify({'error': 'Erro ao processar a solicitação'}), 500
+# Rota protegida usando JWT
+@app.route('/dados', methods=['GET'])
+def get_dados():
+    user_id, error = verify_token(request)
+    if error:
+        return jsonify({"error": error}), 401
+
+    # Verifica o status do usuário na planilha antes de conceder o acesso
+    try:
+        df = pd.read_excel(EXCEL_FILE_PATH)
+        
+        # Busca o status do usuário pelo ID do token
+        user_row = df.loc[df['ID'] == user_id]
+
+        if user_row.empty:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Verifica se o status é "UP"
+        user_status = user_row['Status'].values[0].strip().upper()
+        if user_status != 'UP':
+            return jsonify({"error": "Usuário inativo"}), 403
+
+    except Exception as e:
+        print(f"Erro ao verificar status do usuário: {e}")
+        return jsonify({"error": "Erro ao verificar status do usuário"}), 500
+
+    # Se o usuário está ativo, estabelece a conexão e recupera os dados
+    conn = connect_to_database(server, instance, database, username, password)
+    if conn is None:
+        return jsonify({"error": "Falha na conexão com o banco de dados"}), 500
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM dbo.pythonofx")
+        rows = cursor.fetchall()
+
+        dados = []
+        for row in rows:
+            dados.append({
+                'Banco': row[0],
+                'Agencia': row[1],
+                'Conta': row[2],
+                'Unidade': row[3],
+                'Data': row[4],
+                'Valor': row[5],
+                'Tipo': row[6],
+                'Memo': row[7],
+                'ID': row[8],
+                'Valor_Ajustado': row[9],
+                'Valor_Absoluto': row[10],
+                'Classificação': row[11],
+            })
+        
+        return jsonify(dados)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
