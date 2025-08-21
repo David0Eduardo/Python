@@ -2,157 +2,231 @@ from flask import Flask, jsonify, request
 import pyodbc
 import jwt
 import os
-import pandas as pd
 from dotenv import load_dotenv
+from pathlib import Path
 
 app = Flask(__name__)
 
 # Configurações do banco de dados
-server = 'localhost'
-instance = 'TESTES'
-database = 'pythonofx'
-username = 'python'
-password = 'senha'
+server = '192.168.0.130,1433'
+instance = ''
+username_db = 'sa'
+password_db = ''
 
-load_dotenv()  # Carrega as variáveis do arquivo .env
+database_users = 'ACESSO_API'
+
+env_path = Path('.')/'key.env'
+load_dotenv(dotenv_path=env_path)
 SECRET_KEY = os.getenv('SECRET_KEY')
 
-# Caminho da planilha
-EXCEL_FILE_PATH = 'user_api.xlsx'
-
-print(f"SECRET_KEY: {SECRET_KEY}")  # Verifique se a chave está correta
-
-# Função para conectar ao banco de dados
+# Conexão com o banco de dados
 def connect_to_database(server, instance, database, username, password):
     connection_string = f'DRIVER={{SQL Server}};SERVER={server}\\{instance};DATABASE={database};UID={username};PWD={password};'
     try:
         conn = pyodbc.connect(connection_string)
-        print(f"Conexão estabelecida com sucesso no banco de dados '{database}' na instância '{instance}'!")
         return conn
     except pyodbc.Error as e:
-        print("Erro ao conectar-se ao banco de dados:", e)
+        print("Erro ao conectar ao banco de dados:", e)
         return None
 
-# Função para gerar um token JWT
-def generate_token(user_id):
-    payload = {'user_id': user_id}
-    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
-    return token
 
-# Função para verificar o token JWT
-def verify_token(request):
+# Geração de token JWT
+def generate_token(user_id, allowed_databases, database):
+    """Gera o token JWT apenas com as permissões do usuário verificadas no banco."""
+    try:
+        # Se for admin, setamos 'admin' no token
+        if database == 'admin':
+            allowed_databases = ['admin']
+        payload = {
+            'user_id': int(user_id),
+            'allowed_databases': allowed_databases
+        }
+        token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+        return token
+    except Exception as e:
+        print("Erro ao gerar token:", e)
+        return None
+
+# Função para verificar o token
+def verify_token(request, database_requested):
+    """Função para verificar se o token é válido e se a base solicitada está entre as permitidas."""
     auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.split(" ")[0] == 'Bearer':
+    if auth_header and auth_header.startswith('Bearer '):
         token = auth_header.split(" ")[1]
         try:
+            # Decodificar token
             payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-            return payload['user_id'], None
+            user_id = payload.get('user_id')
+            allowed_databases = payload.get('allowed_databases')
+
+            # Lógica de acesso total para admin
+            if 'admin' in allowed_databases:
+                return user_id, None  # Permissão total para qualquer base
+            
+            # Verifica se a base está entre as permitidas
+            if database_requested in allowed_databases:
+                return user_id, None
+            else:
+                return None, "Acesso não autorizado à base de dados"
         except jwt.ExpiredSignatureError:
             return None, "Token expirado"
         except jwt.InvalidTokenError:
             return None, "Token inválido"
     return None, "Token ausente ou malformado"
 
-# Função para verificar o status do usuário na planilha
-def is_user_active(username):
+# Função para verificar se usuário está ativo e obter suas permissões no banco de dados
+def is_user_active_and_check_database(username):
     try:
-        df = pd.read_excel(EXCEL_FILE_PATH)
-        print("Colunas encontradas na planilha:", df.columns)  # Exibe as colunas para verificação
-        user_status = df.loc[df['User'] == username, 'Status'].values
-        print(f"Status do usuário '{username}':", user_status)
+        conn = connect_to_database(server, instance, database_users, username_db, password_db)
+        if conn is None:
+            return None
 
-        if user_status and user_status[0].strip().upper() == 'UP':
-            return True
-        return False
+        cursor = conn.cursor()
+        # Escapar com [] para evitar conflitos com palavras reservadas
+        query = "SELECT Status, Database FROM [dbo].[tb_acesso_usuario] WHERE [User] = ?"
+        cursor.execute(query, (username,))
+        user_row = cursor.fetchone()
+
+        if user_row:
+            status, allowed_databases = user_row
+            if status.strip().upper() == 'UP':
+                allowed_databases_list = allowed_databases.split(';')
+                cursor.close()
+                conn.close()
+                return allowed_databases_list
+        cursor.close()
+        conn.close()
+        return None
     except Exception as e:
-        print(f"Erro ao ler a planilha: {e}")
-        return False
+        print("Erro ao verificar usuário ativo ou permissões:", str(e))
+        return None
 
-# Endpoint para gerar o token
-@app.route('/get-token', methods=['GET'])
-def get_token():
-    username = request.args.get('username')
-    password = request.args.get('password')
+# Endpoint de login
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    if not data:
+        return jsonify({"error": "Tipo de mídia não suportado"}), 415
 
-    # Carrega os dados da planilha
+    username = data.get('username')
+    password = data.get('password')
+
     try:
-        df = pd.read_excel(EXCEL_FILE_PATH)
-        print("Colunas encontradas na planilha:", df.columns)
+        conn = connect_to_database(server, instance, database_users, username_db, password_db)
+        if conn is None:
+            return jsonify({"error": "Falha na conexão com o banco de dados"}), 500
 
-        # Verifica se o usuário existe na planilha e se a senha corresponde
-        user_row = df.loc[(df['User'] == username) & (df['Password'] == password)]
-        
-        if user_row.empty:
-            return jsonify({'error': 'Usuário ou senha inválidos'}), 401
+        cursor = conn.cursor()
+        query = "SELECT [Password], [User_ID], [Database] FROM [dbo].[tb_acesso_usuario] WHERE [User] = ?"
+        cursor.execute(query, (username,))
+        user_row = cursor.fetchone()
 
-        # Verifica se o usuário está ativo (UP)
-        user_status = user_row['Status'].values[0].strip().upper()
-        if user_status != 'UP':
-            return jsonify({'error': 'Usuário inativo'}), 403
+        if user_row:
+            db_password, user_id, allowed_databases = user_row
+            if db_password == password:
+                allowed_databases_list = allowed_databases.split(';')
+                
+                # Checar se é permissão admin
+                if 'admin' in allowed_databases_list:
+                    token = generate_token(user_id, allowed_databases_list, 'admin')
+                else:
+                    token = generate_token(user_id, allowed_databases_list, allowed_databases)
 
-        # Gera o token usando o ID do usuário da planilha
-        user_id = int(user_row['ID'].values[0])  # Converte para int para evitar problemas de serialização
-        token = generate_token(user_id=user_id)
-        return jsonify({'token': token}), 200
-
+                if token:
+                    return jsonify({'token': token}), 200
+                else:
+                    return jsonify({'error': 'Erro ao gerar token'}), 500
+            else:
+                return jsonify({'error': 'Senha inválida'}), 401
+        else:
+            return jsonify({'error': 'Usuário não encontrado'}), 401
     except Exception as e:
-        print(f"Erro ao processar a planilha: {e}")
-        return jsonify({'error': 'Erro ao processar a solicitação'}), 500
-# Rota protegida usando JWT
-@app.route('/dados', methods=['GET'])
-def get_dados():
-    user_id, error = verify_token(request)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+# Endpoint para consulta de dados
+@app.route('/<database>/<table_name>', methods=['GET'])
+def get_dados(database, table_name):
+    user_id, error = verify_token(request, database)
+
     if error:
         return jsonify({"error": error}), 401
 
-    # Verifica o status do usuário na planilha antes de conceder o acesso
     try:
-        df = pd.read_excel(EXCEL_FILE_PATH)
-        
-        # Busca o status do usuário pelo ID do token
-        user_row = df.loc[df['ID'] == user_id]
+        conn = connect_to_database(server, instance, database, username_db, password_db)
+        if conn is None:
+            return jsonify({"error": "Falha na conexão com o banco de dados"}), 500
 
-        if user_row.empty:
-            return jsonify({"error": "Usuário não encontrado"}), 404
+        cursor = conn.cursor()
+        # Verifica se a tabela existe
+        cursor.execute("SELECT * FROM [information_schema].[tables] WHERE table_name = ?", (table_name,))
+        if not cursor.fetchone():
+            return jsonify({"error": "Tabela não encontrada"}), 404
 
-        # Verifica se o status é "UP"
-        user_status = user_row['Status'].values[0].strip().upper()
-        if user_status != 'UP':
-            return jsonify({"error": "Usuário inativo"}), 403
-
-    except Exception as e:
-        print(f"Erro ao verificar status do usuário: {e}")
-        return jsonify({"error": "Erro ao verificar status do usuário"}), 500
-
-    # Se o usuário está ativo, estabelece a conexão e recupera os dados
-    conn = connect_to_database(server, instance, database, username, password)
-    if conn is None:
-        return jsonify({"error": "Falha na conexão com o banco de dados"}), 500
-
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT * FROM dbo.pythonofx")
+        # Executa a consulta na tabela
+        cursor.execute("SELECT * FROM [dbo].[{}]".format(table_name))
+        colunas = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
+        dados = [{colunas[i]: row[i] for i in range(len(row))} for row in rows]
 
-        dados = []
-        for row in rows:
-            dados.append({
-                'Banco': row[0],
-                'Agencia': row[1],
-                'Conta': row[2],
-                'Unidade': row[3],
-                'Data': row[4],
-                'Valor': row[5],
-                'Tipo': row[6],
-                'Memo': row[7],
-                'ID': row[8],
-                'Valor_Ajustado': row[9],
-                'Valor_Absoluto': row[10],
-                'Classificação': row[11],
-            })
-        
         return jsonify(dados)
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+#Endpoint para inserção de dados
+@app.route('/<database>/<table_name>', methods=['POST'])
+def insert_dados(database, table_name):
+    user_id, error = verify_token(request, database)
+    if error:
+        return jsonify({"error": error}), 401
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON vazio ou inválido"}), 400
+
+    # Garante que sempre seja uma lista
+    if isinstance(data, dict):
+        data = [data]  # transforma registro único em lista
+
+    try:
+        conn = connect_to_database(server, instance, database, username_db, password_db)
+        if conn is None:
+            return jsonify({"error": "Falha na conexão com o banco de dados"}), 500
+
+        cursor = conn.cursor()
+
+        # Verifica se a tabela existe
+        cursor.execute(
+            "SELECT * FROM [information_schema].[tables] WHERE table_name = ?", (table_name,)
+        )
+        if not cursor.fetchone():
+            return jsonify({"error": "Tabela não encontrada"}), 404
+
+        # Insere cada registro da lista
+        for item in data:
+            colunas = ", ".join([f"[{k}]" for k in item.keys()])
+            placeholders = ", ".join(["?"] * len(item))
+            valores = tuple(item.values())
+
+            query = f"INSERT INTO [dbo].[{table_name}] ({colunas}) VALUES ({placeholders})"
+            cursor.execute(query, valores)
+
+        conn.commit()
+
+        return jsonify({
+            "message": "Registros inseridos com sucesso",
+            "tabela": table_name,
+            "quantidade": len(data),
+            "dados": data
+        }), 201
+
+    except Exception as e:
+        conn.rollback()
         return jsonify({"error": str(e)}), 500
     finally:
         cursor.close()
