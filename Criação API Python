@@ -8,13 +8,15 @@ from pathlib import Path
 app = Flask(__name__)
 
 # Configurações do banco de dados
-server = '192.168.0.130,1433'
-instance = ''
+server = 'IP,Porta'
+instance = 'SQL'
 username_db = 'sa'
-password_db = ''
+password_db = 'senha'
 
+# Database de login dos Usuarios
 database_users = 'ACESSO_API'
 
+# Carregar variáveis de ambiente
 env_path = Path('.')/'key.env'
 load_dotenv(dotenv_path=env_path)
 SECRET_KEY = os.getenv('SECRET_KEY')
@@ -61,11 +63,11 @@ def verify_token(request, database_requested):
 
             # Lógica de acesso total para admin
             if 'admin' in allowed_databases:
-                return user_id, None  # Permissão total para qualquer base
+                return user_id, None, "admin"  # Permissão total para qualquer base
             
             # Verifica se a base está entre as permitidas
             if database_requested in allowed_databases:
-                return user_id, None
+                return user_id, None, "user"
             else:
                 return None, "Acesso não autorizado à base de dados"
         except jwt.ExpiredSignatureError:
@@ -181,9 +183,14 @@ def get_dados(database, table_name):
 #Endpoint para inserção de dados
 @app.route('/<database>/<table_name>', methods=['POST'])
 def insert_dados(database, table_name):
-    user_id, error = verify_token(request, database)
+    user_id, error, role = verify_token(request, database)
+
     if error:
         return jsonify({"error": error}), 401
+
+    # Somente admin pode usar DELETE/DROP
+    if role != "admin":
+        return jsonify({"error": "Acesso negado. Apenas administradores podem executar esta operação."}), 403
 
     data = request.get_json()
     if not data:
@@ -232,5 +239,73 @@ def insert_dados(database, table_name):
         cursor.close()
         conn.close()
 
+# Endpoint para deletar ou dropar tabela
+@app.route('/<database>/<table_name>', methods=['DELETE'])
+def drop_or_delete(database, table_name):
+    user_id, error, role = verify_token(request, database)
+
+    if error:
+        return jsonify({"error": error}), 401
+
+    # Somente admin pode usar DELETE/DROP
+    if role != "admin":
+        return jsonify({"error": "Acesso negado. Apenas administradores podem executar esta operação."}), 403
+
+    data = request.get_json()
+    if not data or "command" not in data:
+        return jsonify({"error": "JSON deve conter o campo 'command'"}), 400
+
+    command = data["command"].upper()  # Normaliza
+    criteria = data.get("criteria")    # Opcional no DELETE
+
+    try:
+        conn = connect_to_database(server, instance, database, username_db, password_db)
+        if conn is None:
+            return jsonify({"error": "Falha na conexão com o banco de dados"}), 500
+
+        cursor = conn.cursor()
+
+        # Verifica se a tabela existe
+        cursor.execute(
+            "SELECT * FROM [information_schema].[tables] WHERE table_name = ?", (table_name,)
+        )
+        if not cursor.fetchone():
+            return jsonify({"error": "Tabela não encontrada"}), 404
+
+        # Executa comando
+        if command == "DROP":
+            sql = f"DROP TABLE [dbo].[{table_name}]"
+            cursor.execute(sql)
+
+        elif command == "DELETE":
+            if criteria:
+                conditions = [f"[{col}] = ?" for col in criteria.keys()]
+                where_clause = " AND ".join(conditions)
+                sql = f"DELETE FROM [dbo].[{table_name}] WHERE {where_clause}"
+                values = tuple(criteria.values())
+                cursor.execute(sql, values)
+            else:
+                sql = f"DELETE FROM [dbo].[{table_name}]"
+                cursor.execute(sql)
+        else:
+            return jsonify({"error": "Comando inválido. Use 'DROP' ou 'DELETE'"}), 400
+
+        conn.commit()
+
+        return jsonify({
+            "message": f"Comando executado com sucesso: {sql}",
+            "database": database,
+            "tabela": table_name,
+            "criteria": criteria if criteria else "Todos os registros"
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+# Inicia o servidor
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
